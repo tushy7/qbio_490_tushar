@@ -1,0 +1,165 @@
+---
+title: "Intro to Transcriptomics"
+author: Nicole Black, Wade Boohar, Kayla Xu
+date: 07/17/22
+updated: 10/18/24
+---
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on Brightspace.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner‚Äôs as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In SummarizedExperiment Tutorial, you learned how to manipulate the SummarizedExperiment data structure and turn it into more readable dataframes, saving them as rna_counts, rna_clinical, and rna_genes. In this semi-guided assignment, you will use these dataframes to perform differential expression analysis based on tumor status.
+
+*Pre-Assignment*
+Use knitr function to set your working directory to your analysis_data folder in 490_cluster.
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath("~/490_cluster/analysis_data"))
+```
+
+If DESeq2 is not already installed, install it now
+```{r}
+if (!require("DESeq2", quietly = TRUE))
+BiocManager::install("DESeq2")
+
+```
+
+Load in all necessary packages
+```{r}
+library(TCGAbiolinks)
+
+library(DESeq2)
+
+if (!require("EnhancedVolcano", quietly = TRUE))
+BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+
+rna_query <- GDCquery(project ="TCGA-BRCA",
+data.category = "Transcriptome Profiling",
+data.type = "Gene Expression Quantification",
+workflow.type = "STAR - Counts")
+GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+```
+
+
+
+*1*
+Read in the rna_clinical, rna_genes, and rna_counts dataframes which you made in the "SummarizedExperiment Guided Tutorial" R Notebook
+
+```{r}
+rna_clinical <- read.csv("BCRA_rna_clinical.csv")
+```
+
+```{r}
+rna_genes <- read.csv("BCRA_rna_genes.csv")
+```
+
+```{r}
+rna_counts <- read.csv("BCRA_rna_counts.csv", row.names=1)
+```
+
+
+```{r}
+patient_mask <- !is.na(rna_clinical$age_at_diagnosis) & 
+                !is.na(rna_clinical$vital_status) & 
+                !is.na(rna_clinical$definition)
+
+# Apply mask to rna_clinical
+rna_clinical <- rna_clinical[patient_mask, ]
+str(rna_clinical)
+head(rna_clinical)
+# Apply mask to columns of rna_counts (columns correspond to patients)
+rna_counts <- rna_counts[, patient_mask]
+```
+
+
+*2*
+In this assignment, you will run differential expression analysis comparing patient samples by whether the sample is from a tumor or normal tissue (this is the definition column in rna_clinical). You will need to choose a variable to control for covariance of: age and/or PAM50 subtype (paper_BRCA_Subtype_PAM50). 
+
+Manipulate those columns so that they are ready for differential expression analysis (hint: what kind of variables are they? what data type are they by default? do you need to handle unknown values?) Filter out genes with a total expression across all patients less than 1000.
+```{r}
+# Create a mask that keeps only rows without NA in specific columns
+rna_clinical$vital_status <- factor(rna_clinical$vital_status)
+rna_clinical$age_at_diagnosis<-factor(rna_clinical$age_at_diagnosis)
+rna_clinical$paper_BRCA_Subtype_PAM50<-factor(rna_clinical$paper_BRCA_Subtype_PAM50)
+
+patient_mask <- !is.na(rna_clinical$age_at_diagnosis) & 
+                !is.na(rna_clinical$vital_status) & 
+                !is.na(rna_clinical$paper_BRCA_Subtype_PAM50)
+
+rna_clinical <- rna_clinical[patient_mask, ]
+
+
+gene_filter <- rowSums(rna_counts) >= 1000
+
+
+filtered_rna_counts <- rna_counts[gene_filter, patient_mask]
+
+
+#factoring all three columns
+rna_clinical$definition <- factor(rna_clinical$definition)
+rna_clinical$age_at_diagnosis<-factor(rna_clinical$age_at_diagnosis)
+rna_clinical$paper_BRCA_Subtype_PAM50<-factor(rna_clinical$paper_BRCA_Subtype_PAM50)
+
+
+
+
+```
+
+
+*3*
+Perform the differential expression analysis, All you need to do is fill in the appropriate # terms
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = filtered_rna_counts,
+                              colData = rna_clinical,
+                              design= ~ age_at_diagnosis + paper_BRCA_Subtype_PAM50 + vital_status)
+
+dds_obj <- DESeq(dds)
+
+resultsNames(dds_obj)
+
+results <- results(dds_obj, format = "DataFrame", contrast = c("type of sample", "male" , "female"))
+
+results <- data.frame(results)
+```
+
+Prepare results dataframe for EnhancedVolcano plotting. Add two columns, "-log10(padj)" and "gene_name". Fill in these columns appropriately.
+```{r}
+volcano_plot <- ggplot(results_df, aes(x = log2FoldChange, y = -log10(pvalue))) +
+  geom_point(aes(color = ifelse(results_df$padj < 0.01, "red", "black"))) +
+  geom_hline(yintercept = 2, linetype = "dashed", color = "blue") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "blue") +
+  labs(title = "Volcano Plot of Differential Expression",
+       x = "Log2 Fold Change",
+       y = "-Log10 Adjusted P-value") +
+  theme_minimal() 
+```
+
+*4*
+Now we will use the EnhancedVolcano package to plot our results. The code is already completed and should run without adjustment if all code up to here is correct.
+```{r}
+EnhancedVolcano(results,
+                lab = results$gene_name,
+                x = 'log2FoldChange',
+                y = '-log10(padj)',
+                title = 'Sample Definition: Tumor vs Normal Tissue',
+                pointSize = 1.0,
+                labSize = 5.0)
+ggsave("volcano_plot.png")
+```
+
+*5*
+# Explain what genes from each part of the Volcano Plot mean in terms of their significance and up/down regulation. 
+top-right genes: genes that are highly upregulated and significant.
+bottom-right genes: genes that are highly upregulated but not as significant.
+top-left genes: genes that are highly downregulated and significant. 
+bottom-left genes: genes that are highly downregulated but not as significant.
+top-middle genes: genes that had significant results but were not differentially expressed. 
+bottom-middle genes: genes that were neither differentially expressed nor significant. 
+
+Save the picture of the volcano plot (using either ggsave() or right clicking and manually downloading the image and push this .Rmd and the image to GitHub)
