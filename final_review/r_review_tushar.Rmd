@@ -1,0 +1,283 @@
+---
+title: "Tushar Zhade"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+#set up working directory
+knitr::opts_knit$set(root.dir = normalizePath("~/490_cluster/analysis_data"))
+```
+```{r}
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(survival)
+library(survminer)
+library(ggplot2)
+library(DESeq2) 
+```
+```{r}
+#clinical data
+clin_query <- GDCquery(project = "TCGA-SKCM",
+data.category = "Clinical",
+data.type = "Clinical Supplement",
+data.format = 'BCR Biotab')
+#GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)
+clinic <- clinical.BCRtab.all$clinical_patient_skcm[-c(1,2),]
+```
+```{r}
+# mutation data
+colnames(clinic)[ colnames(clinic) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+maf_query <- GDCquery(project = "TCGA-SKCM",
+    data.category = "Simple Nucleotide Variation",
+    access = "open",
+    data.type = "Masked Somatic Mutation",
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+    )
+#GDCdownload(maf_query)
+maf <- GDCprepare(maf_query)
+maf_object <- read.maf(maf = maf, clinicalData = clinic, isTCGA = TRUE)
+```
+```{r}
+#summarized experiment 
+rna_query <- GDCquery(project ="TCGA-SKCM",
+    data.category = "Transcriptome Profiling",
+    data.type = "Gene Expression Quantification",
+    workflow.type = "STAR - Counts")
+#GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+```
+
+```{r}
+write.csv(clinic, "~/490_cluster/analysis_data/skcm_clinical_data.csv", row.names = FALSE)
+clinic <- read.csv("~/490_cluster/analysis_data/skcm_clinical_data.csv")
+```
+
+
+```{r}
+# 1) survival analysis between metastatic and non-metastatic patients
+rna_clinical <- as.data.frame(rna_se@colData)
+rna_clinical$survival <- ifelse(is.na(rna_clinical$days_to_death), rna_clinical$days_to_last_follow_up, rna_clinical$days_to_death)
+rna_clinical$death_event <- ifelse(rna_clinical$vital_status == "Alive", FALSE, TRUE)
+
+# only keep "Primary solid tumor" or "Metastatic"
+normal_mask <- ifelse(rna_clinical$definition == "Solid Tissue Normal", F, T)
+rna_clinical_masked <- rna_clinical[normal_mask,]
+additional_metastatic_mask <- ifelse(rna_clinical_masked$definition == "Additional Metastatic", F, T)
+rna_clinical_masked <- rna_clinical_masked[additional_metastatic_mask,]
+
+survival_object <- Surv(time = rna_clinical_masked$survival, event = rna_clinical_masked$death_event)
+fit_object <- survfit(survival_object ~ definition, data = rna_clinical_masked)
+survplot <- ggsurvplot(fit_object,
+                       pval = TRUE,
+                       ggtheme = theme(plot.margin = unit(1, "cm")),
+                       legend = "right") 
+
+KM_plot <- survplot$plot + 
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 16),
+        legend.title = element_text(size = 14),
+        legend.text = element_text(size = 12))
+
+print(KM_plot)
+ggsave("KM_plotrreview.png")
+
+
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath("~/490_cluster/analysis_data"))
+```
+
+```{r}
+if (!require("sesameData", quietly = TRUE))
+BiocManager::install("sesameData")
+
+if (!require("sesame", quietly = TRUE))
+BiocManager::install("sesame")
+
+if (!require("limma", quietly = TRUE))
+BiocManager::install("limma")
+```
+
+
+Load in all necessary packages
+```{r}
+library(TCGAbiolinks)
+library(sesame)
+library(sesameData)
+library(limma)
+library(ggplot2)
+```
+
+```{r}
+query <- GDCquery(project = "TCGA-SKCM",
+                  data.category = "DNA Methylation",
+                  data.type = "Methylation Beta Value",
+                  platform = "Illumina Human Methylation 450",
+                  data.format = "Dataframe")
+#GDCdownload(query)
+methylation450 <- GDCprepare(query)
+```
+
+```{r}
+methylation_clinical <- as.data.frame(methylation450@colData)
+betas <- as.data.frame(methylation450@assays@data@listData)
+cpg_sites <- as.data.frame(methylation450@rowRanges@elementMetadata)
+
+column_mask <- ifelse(colnames(methylation_clinical) %in% c('treatments', 'primary_site', 'disease_type'), F, T)
+methylation_clinical <- methylation_clinical[,column_mask]
+write.csv(methylation_clinical, 'SKCM_methylation_clinical.csv')
+
+
+site_mask <- !grepl('-', cpg_sites$gene) & !grepl(';', cpg_sites$gene) & !is.na(cpg_sites$gene) & complete.cases(betas)
+betas <- betas[site_mask,]
+cpg_sites <- cpg_sites[site_mask,]
+
+write.csv(betas, 'SKCM_methylation_betas.csv')
+write.csv(cpg_sites, 'SKCM_cpg_sites.csv')
+```
+
+
+```{r}
+methylation_clinical <- read.csv('SKCM_methylation_clinical.csv')
+betas <- read.csv('SKCM_methylation_betas.csv')
+cpg_sites <- read.csv('SKCM_cpg_sites.csv')
+```
+
+```{r}
+
+normal_tissue_mask <- methylation_clinical$definition == "Solid Tissue Normal"
+
+methylation_clinical$tumor <- !normal_tissue_mask
+
+mval <- t(apply(betas, 1, function(x) log2(x/(1-x))))
+design <- model.matrix(~ tumor, data = methylation_clinical)
+fit <- lmFit(mval, design)
+fit2 <- eBayes(fit)
+```
+
+```{r}
+
+dat <- data.frame(foldchange = fit[["coefficients"]][,2], logPvalue =  -log10(p.adjust(fit2[["p.value"]][,2],method='BY')), geneName = cpg_sites$gene)
+dat$threshold <- as.factor(abs(dat$foldchange) < 1)
+
+#Visualization
+cols <- c("TRUE" = "grey", "FALSE" = "blue")
+ggplot(data=dat, aes(x=foldchange, y = logPvalue, color=threshold)) +
+  geom_point(alpha=.2, size=0.6) +
+  scale_colour_manual(values = cols) +
+  geom_vline(xintercept = 1, colour="#990000", linetype="dashed") + 
+  geom_vline(xintercept = - 1, colour="#990000", linetype="dashed") +
+  geom_hline(yintercept = 2, colour = "#990000", linetype="dashed") +
+  theme(legend.position="none") +
+  xlab("Fold Change") +
+  ylab("-log10 p value") +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+```{r}
+library(TCGAbiolinks)
+library(DESeq2)
+library(EnhancedVolcano)
+```
+
+*1*
+Read in the rna_clinical, rna_genes, and rna_counts dataframes which you made in the "SummarizedExperiment Guided Tutorial" R Notebook
+
+```{r}
+rna_clinical <- read.csv("SKCM_rna_clinical.csv")
+rna_genes <- read.csv("SKCM_rna_genes.csv")
+rna_counts <- read.csv("SKCM_rna_counts.csv", row.names=1)
+```
+
+
+*2*
+In this assignment, you will run differential expression analysis comparing patient samples by whether the sample is from a tumor or normal tissue (this is the definition column in rna_clinical). You will need to choose a variable to control for covariance of: age and/or PAM50 subtype (paper_BRCA_Subtype_PAM50). 
+
+Manipulate those columns so that they are ready for differential expression analysis (hint: what kind of variables are they? what data type are they by default? do you need to handle unknown values?) Filter out genes with a total expression across all patients less than 1000.
+```{r}
+# Define tissue type based on the "definition" column
+rna_clinical[,"Tissue_Type"] <- ifelse(rna_clinical$definition == 'Primary solid Tumor', 
+                                       'Tumor', 
+                                       ifelse(rna_clinical$definition == 'Solid Tissue Normal', 
+                                              'Normal', NA))
+
+# Copy the age information into a new column
+rna_clinical[, "Age"] <- rna_clinical[, "age_at_index"]
+
+# Convert Tissue_Type to a factor
+rna_clinical[,"Tissue_Type"] <- factor(rna_clinical[,"Tissue_Type"])
+
+# Mask rows with missing Tissue_Type or Age
+NA_mask <- is.na(rna_clinical[, "Tissue_Type"]) | is.na(rna_clinical[, "Age"])
+rna_clinical_masked <- rna_clinical[!NA_mask, ]
+
+# Mask corresponding columns in the RNA counts data
+rna_counts_masked <- rna_counts[, !NA_mask]
+
+# Filter genes with low counts (sum across samples < 1000)
+counts_mask <- rowSums(rna_counts_masked) >= 1000
+rna_counts_masked <- rna_counts_masked[counts_mask, ]
+rna_genes_masked <- rna_genes[counts_mask, ]
+```
+
+Prepare results dataframe for EnhancedVolcano plotting. Add two columns, "-log10(padj)" and "gene_name". Fill in these columns appropriately.
+```{r}
+# Load results data frame
+results <- read.csv("results.csv", row.names = 1)
+
+# Add "-log10(padj)" column for EnhancedVolcano plotting
+results[, "-log10(padj)"] <- -log10(results$padj)
+
+# Add "gene_name" column from the masked RNA genes
+results[, "gene_name"] <- rna_genes_masked$gene_name
+
+
+```
+
+
+""""
+
+
+```{r}
+downregulated <- results[(results$log2FoldChange < -3), 'gene_name']
+hypermethylated <- dat[dat$foldchange > 2, 'geneName']
+interest_genes <- intersect(downregulated, hypermethylated)
+```
+
+
+```{r}
+GENE<-"TNS1"
+
+gene_counts_mask <- rna_genes$gene_name == GENE
+gene_betas_mask <- cpg_sites$gene == GENE
+
+rna_clinical_tumor <- rna_clinical$definition == "Primary solid Tumor"
+methylation_clinical_tumor <- methylation_clinical$definition == "Primary solid Tumor"
+
+rna_clinical_normal <- rna_clinical$definition == "Solid Tissue Normal"
+methylation_clinical_normal <- methylation_clinical$definition == "Solid Tissue Normal"
+
+rna_tumor <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_tumor])
+methylation_tumor <- (betas[gene_betas_mask, methylation_clinical_tumor])
+
+rna_normal <- as.numeric(rna_counts[gene_counts_mask, rna_clinical_normal])
+methylation_normal <- (betas[gene_betas_mask, methylation_clinical_normal])
+```
+
+```{r}
+boxplot(rna_normal, rna_tumor, xlab='Group', ylab='Counts', names=c('Normal', 'Tumor'))
+```
+
+
+```{r}
+plot(1:dim(methylation_normal)[1], apply(methylation_normal, 1, mean), col='blue', type='h', lwd=3, ylab='Average Beta', xlab='CpG sites')
+lines(1.3:(dim(methylation_normal)[1]+0.3), apply(methylation_tumor, 1, mean), col='red', type='h', lwd=3)
+```
+
